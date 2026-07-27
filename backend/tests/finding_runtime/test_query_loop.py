@@ -412,6 +412,8 @@ def test_finalize_finding_description_explains_terminal_contract_and_required_fi
 
     assert "提交 Finding 阶段的最终结构化审计结论" in description
     assert "这是终点工具" in description
+    assert "findings 必须是数组，summary 必须是字符串" in description
+    assert '{"findings": [], "summary": "..."}' in description
     assert "审计完成且没有确认可报告漏洞时" in description
     assert "不要调用 FinalizeFinding" in description
     assert "vulnerability_type、severity、title、description" in description
@@ -462,7 +464,7 @@ def test_runner_rejects_reason_only_finalize_finding_payload_without_terminal_co
     assert result.terminal_action is None
     assert result.completion_mode is None
     assert len(client.calls) == 2
-    assert snapshot.tool_calls[0].status == AuditToolCallStatus.COMPLETED.value
+    assert snapshot.tool_calls[0].status == AuditToolCallStatus.INVALID.value
     assert snapshot.tool_calls[0].output_payload["finalization_rejected"] is True
     assert "reason" in snapshot.tool_calls[0].output_payload["validation_errors"][0]["message"]
 
@@ -513,16 +515,70 @@ def test_runner_invalid_finalize_finding_continues_with_tool_error_feedback():
     assert result.terminal_action is None
     assert result.completion_mode is None
     assert len(client.calls) == 2
-    assert snapshot.tool_calls[0].status == AuditToolCallStatus.COMPLETED.value
+    assert snapshot.tool_calls[0].status == AuditToolCallStatus.INVALID.value
     assert snapshot.tool_calls[0].output_payload["finalization_rejected"] is True
     assert snapshot.messages[-2].role == RuntimeMessageRole.TOOL_RESULT.value
-    assert snapshot.messages[-2].message_metadata["is_error"] is False
+    assert snapshot.messages[-2].message_metadata["is_error"] is True
     transition_checkpoints = [
         checkpoint.state_payload
         for checkpoint in snapshot.checkpoints
         if checkpoint.state_payload.get("transition") is not None or "transition" in checkpoint.state_payload
     ]
     assert transition_checkpoints[0]["transition"] == RuntimeContinueReason.NEXT_TURN.value
+
+
+def test_runner_retries_rejected_finalization_after_terminal_nudge():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="完成审计"))
+    client = FakeModelClient(
+        responses=[
+            {
+                "content": "Submit final result",
+                "tool_calls": [
+                    {
+                        "id": "tool-invalid",
+                        "name": "FinalizeFinding",
+                        "input": {"findings": ""},
+                    }
+                ],
+            },
+            {
+                "content": "Let me provide the corrected structure.",
+                "stop_reason": RuntimeStopReason.COMPLETED.value,
+            },
+            {
+                "content": "Submit corrected result",
+                "tool_calls": [
+                    {
+                        "id": "tool-valid",
+                        "name": "FinalizeFinding",
+                        "input": _valid_finalize_input(),
+                    }
+                ],
+            },
+        ]
+    )
+    registry = ToolRegistry([FinalizeFindingTool()])
+    runner = FindingRuntimeRunner(
+        session_store=store,
+        model_client=client,
+        tool_registry=registry,
+        tool_orchestrator=ToolOrchestrator(session_store=store, tool_registry=registry),
+        max_turns=3,
+        require_terminal_action=True,
+        terminal_action_nudge_limit=2,
+    )
+
+    result = asyncio.run(runner.run_once(session_id=session_id, model_name="gpt-test"))
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.completion_mode is RuntimeCompletionMode.FINALIZE_TOOL
+    assert result.final_payload == _valid_finalize_input()
+    assert snapshot.tool_calls[0].status == AuditToolCallStatus.INVALID.value
+    assert snapshot.tool_calls[-1].status == AuditToolCallStatus.COMPLETED.value
+    assert any(item.name == "terminal_action_nudge" for item in snapshot.messages)
+    assert len(client.calls) == 3
 
 
 def test_query_loop_marks_natural_end_without_terminal_action():

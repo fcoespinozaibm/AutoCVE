@@ -22,6 +22,9 @@ class FinalizeFindingTool(RuntimeTool):
     name = "FinalizeFinding"
     description = (
         "提交 Finding 阶段的最终结构化审计结论。这是终点工具，不是记录中间发现的工具。\n\n"
+        "顶层参数形状必须是 JSON 对象：findings 必须是数组，summary 必须是字符串。"
+        "没有确认漏洞时的最小合法形状为 {\"findings\": [], \"summary\": \"...\"}；"
+        "禁止提交 {\"findings\": \"\"}、只提交 findings，或把 findings 写成自然语言。\n\n"
         "重要：一旦 FinalizeFinding 调用成功，Finding 阶段会立即终止，后续不会继续搜索、验证或补充漏洞。"
         "因此，只有在已经完成充分审计并准备结束整个 Finding 阶段时，才允许调用本工具。\n\n"
         "不要在发现第一个漏洞后立即调用本工具。发现一个漏洞后，应继续搜索其他独立攻击面，"
@@ -98,7 +101,16 @@ class FinalizeFindingTool(RuntimeTool):
                         "verification_notes",
                     ],
                 },
-                metadata={"finalization_rejected": True},
+                metadata={
+                    "finalization_rejected": True,
+                    "error_kind": "finalization_validation_error",
+                    "tool_call_status": "invalid",
+                },
+                # A rejected finalization is deliberately surfaced as a tool
+                # error.  Treating it as "completed" suppresses the terminal
+                # action recovery path and leaves weaker tool-calling models
+                # no reliable chance to submit a corrected payload.
+                is_error=True,
             )
 
         final_payload = parsed_input.model_dump(mode="json", exclude_none=True)

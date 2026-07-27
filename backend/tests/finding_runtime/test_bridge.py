@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -20,6 +21,8 @@ from app.services.finding_runtime.models import (
     TranscriptItem,
     TurnExecutionResult,
 )
+from app.services.finding_runtime.tooling import ToolRegistry
+from app.services.finding_runtime.tools.finalize_finding import FinalizeFindingTool
 from app.services.agent.tools.base import AgentTool, ToolResult
 
 
@@ -47,16 +50,15 @@ class FakeLLMService:
 
     async def chat_completion(self, *, messages, agent_type, tools, parallel_tool_calls, max_tokens=None):
         assert agent_type == "finding"
-        assert parallel_tool_calls is True
         assert tools is not None
-        self.calls.append({"messages": messages, "tools": tools, "max_tokens": max_tokens})
+        self.calls.append({"messages": messages, "tools": tools, "max_tokens": max_tokens, "parallel_tool_calls": parallel_tool_calls})
         if not self.responses:
             return {"content": "{}", "finish_reason": "stop"}
         return self.responses.pop(0)
 
     async def chat_completion_stream(self, *, messages, agent_type, tools, parallel_tool_calls, max_tokens=None, retry_enabled=True):
         assert agent_type == "finding"
-        self.calls.append({"messages": messages, "tools": tools, "max_tokens": max_tokens, "stream": True, "retry_enabled": retry_enabled})
+        self.calls.append({"messages": messages, "tools": tools, "max_tokens": max_tokens, "stream": True, "retry_enabled": retry_enabled, "parallel_tool_calls": parallel_tool_calls})
         if not self.responses:
             yield {"type": "done", "content": "{}", "usage": {}, "tool_calls": []}
             return
@@ -386,6 +388,37 @@ def test_bridge_finalizer_prompt_does_not_force_empty_findings_for_incomplete_au
     assert "只有在审计已经完成" in prompt
     assert "如果仍需继续查看文件、验证调用链、补齐 source/sink/PoC/影响面" in prompt
     assert "证据不足" not in prompt
+
+
+def test_runtime_model_client_flattens_finalization_schema_for_local_tool_compatibility():
+    client = RuntimeLLMModelClient(llm_service=FakeLLMService([]), agent_type="finding")
+    definition = ToolRegistry([FinalizeFindingTool()]).describe_tools()[0]
+
+    schema = client._to_llm_tool_schema(definition)["function"]["parameters"]
+
+    assert "$defs" not in json.dumps(schema, ensure_ascii=False)
+    assert "$ref" not in json.dumps(schema, ensure_ascii=False)
+    assert set(schema["required"]) == {"findings", "summary"}
+
+
+def test_runtime_model_client_disables_parallel_tool_calls_for_mimo_and_finalization_recovery():
+    mimo = FakeLLMServiceWithConfig(provider="mimo", endpoint_protocol="openai_chat")
+    client = RuntimeLLMModelClient(llm_service=mimo, agent_type="finding")
+    normal_tools = [{"name": "Read", "input_schema": {"type": "object"}}]
+
+    assert client._parallel_tool_calls_enabled(
+        model_name="mimo-v2.5-flash",
+        tool_definitions=normal_tools,
+        transcript=[TranscriptItem(role=RuntimeMessageRole.USER, content="inspect")],
+    ) is False
+
+    deepseek = FakeLLMServiceWithConfig(provider="deepseek", endpoint_protocol="openai_chat")
+    client = RuntimeLLMModelClient(llm_service=deepseek, agent_type="finding")
+    assert client._parallel_tool_calls_enabled(
+        model_name="deepseek-v4-flash",
+        tool_definitions=normal_tools,
+        transcript=[TranscriptItem(role=RuntimeMessageRole.USER, name="runtime_finalizer", content="finalize")],
+    ) is False
 
 
 def test_bridge_fallback_summary_uses_last_assistant_message():
@@ -1022,7 +1055,7 @@ def test_continue_session_until_payload_adds_auto_finalizer_prompt(monkeypatch):
     ]
 
     assert result["final_payload"]["findings"] == []
-    assert len(finalization_prompts) == 1
+    assert len(finalization_prompts) == 3
     assert "FinalizeFinding" in finalization_prompts[0].content
 
 

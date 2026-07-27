@@ -612,7 +612,20 @@ class QueryLoop:
             next_state = build_continue_state(state, messages=next_messages, transition=transition)
             streaming_state = QueryLoopState(tool_use_context=tool_use_context)
             next_tool_use_context = self._apply_tool_search_activations(state=streaming_state, records=records)
-            next_tool_use_context.pop("missing_terminal_action_nudge_count", None)
+            finalization_rejection = self._extract_finalization_rejection(records)
+            if finalization_rejection is not None:
+                # A rejected finalizer is not progress toward a terminal action.
+                # Keep this structured state for the next model turn so that a
+                # natural-language response receives a correction nudge instead
+                # of being mistaken for a completed tool-use cycle.
+                next_tool_use_context["last_finalization_rejection"] = finalization_rejection
+                next_tool_use_context["finalization_rejection_count"] = int(
+                    (state.tool_use_context or {}).get("finalization_rejection_count") or 0
+                ) + 1
+            else:
+                next_tool_use_context.pop("last_finalization_rejection", None)
+                next_tool_use_context.pop("finalization_rejection_count", None)
+                next_tool_use_context.pop("missing_terminal_action_nudge_count", None)
             next_state.tool_use_context = next_tool_use_context
             next_state.pending_tool_use_summary = pending_tool_use_summary
             self._session_store.save_query_loop_state(session_id, next_state)
@@ -763,7 +776,8 @@ class QueryLoop:
                     name="terminal_action_nudge",
                     metadata={"synthetic": True, "kind": "terminal_action_nudge"},
                 )
-                nudge_message.content = self._terminal_action_nudge_message or (
+                finalization_rejection_message = self._format_finalization_rejection_nudge(state)
+                nudge_message.content = self._terminal_action_nudge_message or finalization_rejection_message or (
                     "你的上一条回复没有发起任何工具调用，也没有提交最终结构化结果，因此 Finding 阶段尚未完成。\n\n"
                     "下一条 assistant 响应必须满足以下二选一：\n"
                     "1. 如果还需要继续审计、追踪、读取、搜索、验证、补齐证据，或还没有充分覆盖主要高风险攻击面，必须立即调用 "
@@ -1569,6 +1583,43 @@ class QueryLoop:
             if isinstance(final_payload, dict):
                 return dict(final_payload)
         return None
+
+    @staticmethod
+    def _extract_finalization_rejection(records) -> dict[str, Any] | None:
+        for record in reversed(records or []):
+            result = getattr(record, "result", None)
+            output_payload = dict(getattr(result, "output_payload", {}) or {}) if result is not None else {}
+            if not output_payload.get("finalization_rejected"):
+                continue
+            validation_errors = output_payload.get("validation_errors")
+            return {
+                "tool_name": str(getattr(getattr(record, "request", None), "name", "FinalizeFinding") or "FinalizeFinding"),
+                "validation_errors": list(validation_errors) if isinstance(validation_errors, list) else [],
+            }
+        return None
+
+    @staticmethod
+    def _format_finalization_rejection_nudge(state: QueryLoopState) -> str | None:
+        rejection = dict((state.tool_use_context or {}).get("last_finalization_rejection") or {})
+        if not rejection:
+            return None
+        tool_name = str(rejection.get("tool_name") or "FinalizeFinding")
+        errors: list[str] = []
+        for item in rejection.get("validation_errors") or []:
+            if not isinstance(item, dict):
+                continue
+            message = str(item.get("message") or "").strip()
+            if message and message not in errors:
+                errors.append(message)
+        error_summary = "；".join(errors[:6]) or "最终结构化参数未通过校验"
+        return (
+            f"上一轮 {tool_name} 被参数校验拒绝，尚未完成 Finding 阶段。\n"
+            f"校验错误：{error_summary}\n\n"
+            "现在不要只回复自然语言。请根据工具错误直接再次发起原生 FinalizeFinding 调用。"
+            "顶层参数必须是 JSON 对象：findings 必须是数组，且必须提供 summary；"
+            "没有确认漏洞时允许 {\"findings\": [], \"summary\": \"...\"}。"
+            "如果缺少 source/sink/PoC 等证据字段，请先调用只读工具补证据，不能编造字段内容。"
+        )
 
     @staticmethod
     def _extract_finalize_terminal_action(records) -> RuntimeTerminalAction:

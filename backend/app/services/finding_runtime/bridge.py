@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 from collections.abc import AsyncGenerator, Callable
+from copy import deepcopy
 from typing import Any
 
 from app.db.session import get_sync_session_factory
@@ -31,13 +32,18 @@ from app.services.runtime_core.tool_message_codec import (
     ToolMessageFormat,
     build_runtime_model_messages,
 )
-from app.services.llm.protocols.registry import resolve_tool_message_format
+from app.services.llm.protocols.registry import get_provider_metadata, resolve_tool_message_format
+from app.services.llm.types import LLMProvider
 
 READ_SAFE_RUNTIME_TOOLS = {"Read", "Glob", "Grep", "Skill"}
+FINALIZATION_EVIDENCE_RECOVERY_TOOLS = {"Read", "Glob", "Grep"}
 REPORT_GENERATION_RUNTIME_TOOLS = {"Read", "Glob", "Grep"}
 INTERNAL_TOOL_NAMES = {"think", "reflect", "load_skill_body", "skill_resource_lookup"}
 AUTO_FINALIZER_PROMPTS_ENABLED = True
 RESUME_TERMINAL_ACTION_NUDGE_LIMIT = 5
+FINALIZER_PROMPT_ATTEMPTS = 3
+FINALIZER_TURNS_PER_ATTEMPT = 3
+FINALIZER_EVIDENCE_RECOVERY_TURNS = 4
 RUNTIME_FINALIZATION_PROMPT = (
     "你正在处理 Finding 阶段的最终提交恢复流程。\n\n"
     "不要因为当前已经存在一个完整漏洞就直接结束。FinalizeFinding 是终点工具，调用成功后审计会立即停止。\n\n"
@@ -94,7 +100,6 @@ class RuntimeLLMModelClient:
         tool_definitions: list[dict[str, Any]],
         max_output_tokens_override: int | None = None,
     ) -> RuntimeModelResponse:
-        del model_name
         messages = self._build_messages(
             system_prompt=system_prompt,
             recon_payload=recon_payload,
@@ -106,7 +111,11 @@ class RuntimeLLMModelClient:
             messages=messages,
             agent_type=self._agent_type,
             tools=[self._to_llm_tool_schema(item) for item in tool_definitions],
-            parallel_tool_calls=True,
+            parallel_tool_calls=self._parallel_tool_calls_enabled(
+                model_name=model_name,
+                tool_definitions=tool_definitions,
+                transcript=transcript,
+            ),
             max_tokens=max_output_tokens_override,
         )
         return RuntimeModelResponse(
@@ -130,7 +139,6 @@ class RuntimeLLMModelClient:
         on_event: Callable[[dict[str, Any]], Any] | None = None,
         max_output_tokens_override: int | None = None,
     ) -> RuntimeModelResponse:
-        del model_name
         messages = self._build_messages(
             system_prompt=system_prompt,
             recon_payload=recon_payload,
@@ -144,7 +152,11 @@ class RuntimeLLMModelClient:
             messages=messages,
             agent_type=self._agent_type,
             tools=[self._to_llm_tool_schema(item) for item in tool_definitions],
-            parallel_tool_calls=True,
+            parallel_tool_calls=self._parallel_tool_calls_enabled(
+                model_name=model_name,
+                tool_definitions=tool_definitions,
+                transcript=transcript,
+            ),
             max_tokens=max_output_tokens_override,
             **self._finding_stream_retry_override(self._llm_service.chat_completion_stream),
         ):
@@ -184,7 +196,6 @@ class RuntimeLLMModelClient:
         tool_definitions: list[dict[str, Any]],
         max_output_tokens_override: int | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        del model_name
         messages = self._build_messages(
             system_prompt=system_prompt,
             recon_payload=recon_payload,
@@ -199,7 +210,11 @@ class RuntimeLLMModelClient:
                 messages=messages,
                 agent_type=self._agent_type,
                 tools=[self._to_llm_tool_schema(item) for item in tool_definitions],
-                parallel_tool_calls=True,
+                parallel_tool_calls=self._parallel_tool_calls_enabled(
+                    model_name=model_name,
+                    tool_definitions=tool_definitions,
+                    transcript=transcript,
+                ),
                 max_tokens=max_output_tokens_override,
                 **self._finding_stream_retry_override(stream_fn),
             ):
@@ -335,16 +350,88 @@ class RuntimeLLMModelClient:
             }
         return None
 
+    def _parallel_tool_calls_enabled(
+        self,
+        *,
+        model_name: str,
+        tool_definitions: list[dict[str, Any]],
+        transcript: list[Any],
+    ) -> bool:
+        """Respect provider capability metadata and serialise finalization recovery."""
+        if self._is_finalization_recovery(transcript):
+            return False
+        config = getattr(self._llm_service, "config", None)
+        if config is None:
+            # Preserve the old behaviour for lightweight test doubles and
+            # integrations that have not exposed a provider configuration.
+            return True
+        raw_provider = getattr(config, "provider", None)
+        provider_value = getattr(raw_provider, "value", raw_provider)
+        try:
+            provider = provider_value if isinstance(provider_value, LLMProvider) else LLMProvider(str(provider_value))
+        except (TypeError, ValueError):
+            return False
+        capability = dict(get_provider_metadata(provider).get("tool_capability") or {})
+        return bool(capability.get("parallel_tool_calls", False))
+
+    @staticmethod
+    def _is_finalization_recovery(transcript: list[Any]) -> bool:
+        for item in reversed(list(transcript or [])[-4:]):
+            name = str(getattr(item, "name", "") or "")
+            metadata = getattr(item, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = getattr(item, "message_metadata", {}) or {}
+            if name.startswith("runtime_finalizer") or metadata.get("kind") == "finalization_prompt":
+                return True
+        return False
+
     @staticmethod
     def _to_llm_tool_schema(definition: dict[str, Any]) -> dict[str, Any]:
+        name = str(definition.get("name") or "")
+        parameters = definition.get("input_schema", {"type": "object"})
+        if name.startswith("Finalize"):
+            parameters = RuntimeLLMModelClient._flatten_finalization_schema(parameters)
         return {
             "type": "function",
             "function": {
-                "name": definition.get("name", ""),
+                "name": name,
                 "description": definition.get("description", ""),
-                "parameters": definition.get("input_schema", {"type": "object"}),
+                "parameters": parameters,
             },
         }
+
+    @staticmethod
+    def _flatten_finalization_schema(schema: Any) -> dict[str, Any]:
+        """Inline local Pydantic $defs for OpenAI-compatible local models.
+
+        The server-side Pydantic model remains the authority.  This only
+        reduces schema indirection in the prompt sent to models that commonly
+        ignore `$ref` in function-call parameter definitions.
+        """
+        root = deepcopy(schema) if isinstance(schema, dict) else {"type": "object"}
+        definitions = dict(root.pop("$defs", {}) or {})
+
+        def inline(value: Any, resolving: tuple[str, ...] = ()) -> Any:
+            if isinstance(value, list):
+                return [inline(item, resolving) for item in value]
+            if not isinstance(value, dict):
+                return value
+            ref = str(value.get("$ref") or "")
+            if ref.startswith("#/$defs/"):
+                key = ref.removeprefix("#/$defs/")
+                if key in definitions and key not in resolving:
+                    resolved = inline(deepcopy(definitions[key]), (*resolving, key))
+                    if isinstance(resolved, dict):
+                        resolved.update({key: inline(item, resolving) for key, item in value.items() if key != "$ref"})
+                    return resolved
+            return {
+                key: inline(item, resolving)
+                for key, item in value.items()
+                if key not in {"$defs", "title", "examples"}
+            }
+
+        flattened = inline(root)
+        return flattened if isinstance(flattened, dict) else {"type": "object"}
 
     @staticmethod
     def _map_transcript_item(item: Any) -> dict[str, str] | None:
@@ -881,23 +968,50 @@ class FindingRuntimeBridge:
         finalizer_registry = ToolRegistry(finalizer_tools or [FinalizeFindingTool()])
         finalizer_orchestrator = ToolOrchestrator(session_store=self._session_store, tool_registry=finalizer_registry)
         for index, prompt in enumerate(finalizer_prompts, start=1):
+            snapshot = self._session_store.load_session_snapshot(session_id)
+            rejection = self._latest_finalization_rejection(snapshot)
+            evidence_recovery = rejection is None or self._finalization_rejection_needs_evidence(rejection)
+            active_registry = (
+                self._build_finalization_evidence_recovery_registry(finalizer_registry)
+                if evidence_recovery
+                else finalizer_registry
+            )
+            active_orchestrator = (
+                ToolOrchestrator(session_store=self._session_store, tool_registry=active_registry)
+                if active_registry is not finalizer_registry
+                else finalizer_orchestrator
+            )
             self._session_store.append_message(
                 session_id,
                 TranscriptItem(
                     role=RuntimeMessageRole.USER,
                     name='runtime_finalizer' if index == 1 else f'runtime_finalizer_retry_{index}',
-                    content=prompt,
-                    metadata={'kind': 'finalization_prompt', 'attempt': index},
+                    content=self._build_finalizer_recovery_prompt(
+                        prompt=prompt,
+                        rejection=rejection,
+                        evidence_recovery=evidence_recovery,
+                    ),
+                    metadata={
+                        'kind': 'finalization_prompt',
+                        'attempt': index,
+                        'evidence_recovery': evidence_recovery,
+                    },
                 ),
             )
             runner = FindingRuntimeRunner(
                 session_store=self._session_store,
                 model_client=model_client,
-                tool_registry=finalizer_registry,
-                tool_orchestrator=finalizer_orchestrator,
-                max_turns=2 if max_turns is None else max(1, min(2, max_turns)),
+                tool_registry=active_registry,
+                tool_orchestrator=active_orchestrator,
+                # Finalization recovery has its own bounded budget.  It must
+                # not be consumed by the main audit's exhausted turn limit.
+                max_turns=(
+                    FINALIZER_EVIDENCE_RECOVERY_TURNS
+                    if evidence_recovery
+                    else FINALIZER_TURNS_PER_ATTEMPT
+                ),
                 require_terminal_action=True,
-                terminal_action_nudge_limit=1,
+                terminal_action_nudge_limit=2,
                 terminal_action_nudge_message=terminal_action_nudge_message,
             )
             await runner.run_once(session_id=session_id, model_name=model_name)
@@ -929,6 +1043,19 @@ class FindingRuntimeBridge:
         )
         allowed_names = {*REPORT_GENERATION_RUNTIME_TOOLS, FinalizeVulnerabilityReportsTool.name}
         return ToolRegistry([tool for tool in full_registry.all_tools() if tool.name in allowed_names])
+
+    def _build_finalization_evidence_recovery_registry(self, finalizer_registry: ToolRegistry) -> ToolRegistry:
+        """Expose only read-only evidence tools while repairing a final report."""
+        finalizer_tools = {tool.name: tool for tool in finalizer_registry.all_tools()}
+        recovery_tools = [
+            tool
+            for tool in self._build_tool_registry().all_tools()
+            if tool.name in FINALIZATION_EVIDENCE_RECOVERY_TOOLS
+        ]
+        for tool in finalizer_tools.values():
+            if tool.name not in {item.name for item in recovery_tools}:
+                recovery_tools.append(tool)
+        return ToolRegistry(recovery_tools)
 
     def prepare_report_generation_continuation(
         self,
@@ -987,10 +1114,65 @@ class FindingRuntimeBridge:
     def _default_finalizer_prompts() -> list[str]:
         if not AUTO_FINALIZER_PROMPTS_ENABLED:
             return []
-        return [
+        initial_prompt = (
             RUNTIME_FINALIZATION_PROMPT
             + "\n如果仍需继续查看文件、验证调用链、补齐 source/sink/PoC/影响面，请继续调用工具，不要结束。"
-        ]
+        )
+        retry_prompt = (
+            "这是 FinalizeFinding 的受限恢复重试。上一轮没有形成有效的最终结构化结果。"
+            "不要只解释、不要重复自然语言总结；现在必须使用可用的原生工具推进。"
+            "若上次为参数形状错误，直接重新调用 FinalizeFinding；若缺少证据，先使用只读工具核实，再提交完整结果。"
+        )
+        return [initial_prompt, *([retry_prompt] * (FINALIZER_PROMPT_ATTEMPTS - 1))]
+
+    @staticmethod
+    def _latest_finalization_rejection(snapshot: Any) -> dict[str, Any] | None:
+        for tool_call in reversed(list(getattr(snapshot, "tool_calls", []) or [])):
+            output_payload = dict(getattr(tool_call, "output_payload", {}) or {})
+            if not output_payload.get("finalization_rejected"):
+                continue
+            return {
+                "tool_name": str(getattr(tool_call, "tool_name", "FinalizeFinding") or "FinalizeFinding"),
+                "validation_errors": list(output_payload.get("validation_errors") or []),
+            }
+        return None
+
+    @staticmethod
+    def _finalization_rejection_needs_evidence(rejection: dict[str, Any]) -> bool:
+        for item in rejection.get("validation_errors") or []:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("field") or "")
+            # Root shape errors (such as findings="") are repaired by an
+            # immediate finalizer-only retry.  Nested finding errors need
+            # evidence and may use the restricted read-only registry.
+            if field.startswith("findings."):
+                return True
+        return False
+
+    @staticmethod
+    def _build_finalizer_recovery_prompt(
+        *,
+        prompt: str,
+        rejection: dict[str, Any] | None,
+        evidence_recovery: bool,
+    ) -> str:
+        if rejection is None:
+            return prompt
+        errors: list[str] = []
+        for item in rejection.get("validation_errors") or []:
+            if isinstance(item, dict):
+                message = str(item.get("message") or "").strip()
+                if message and message not in errors:
+                    errors.append(message)
+        error_summary = "；".join(errors[:6]) or "最终结构化参数未通过校验"
+        guidance = (
+            "该错误涉及 finding 内部字段。只能使用 Read、Glob、Grep 补充已有代码证据；"
+            "不要编造 source、sink、PoC 或影响。完成补证据后必须重新调用终结工具。"
+            if evidence_recovery
+            else "这是顶层参数形状错误。现在只能重新调用终结工具；findings 必须是数组，且必须提供 summary。"
+        )
+        return f"{prompt}\n\n上一轮终结提交被拒绝：{error_summary}\n{guidance}"
 
     @classmethod
     def _default_fallback_payload(cls, snapshot: Any) -> dict[str, Any]:

@@ -771,11 +771,47 @@ class ToolOrchestrator:
             )
 
         self._emit_hook_event(event_name="PostToolUse", context=context, tool_name=request.name)
-        context.report_progress(event="tool_complete", message=f"Completed {prepared_call.tool.user_facing_name(prepared_call.parsed_input)}")
         duration_ms = max(0, int((perf_counter() - started) * 1000))
         output_payload = dict(result.output_payload or {})
         if result.context_modifier is not None:
             output_payload.setdefault("context_modifier", dict(result.context_modifier))
+        if result.is_error:
+            context.report_progress(
+                event="tool_error",
+                message=f"Rejected {prepared_call.tool.user_facing_name(prepared_call.parsed_input)}",
+            )
+            metadata = dict(result.metadata or {})
+            requested_status = str(metadata.get("tool_call_status") or "").strip().lower()
+            status = (
+                AuditToolCallStatus.INVALID.value
+                if requested_status == AuditToolCallStatus.INVALID.value
+                else AuditToolCallStatus.FAILED.value
+            )
+            return self._finalize_error_record(
+                tool_call_id=tool_call_id,
+                request=request,
+                status=status,
+                is_concurrency_safe=prepared_call.is_concurrency_safe,
+                started=started,
+                message=str(result.content or "Tool execution failed"),
+                output_payload=output_payload,
+                metadata={
+                    **metadata,
+                    "progress_event_count": len(progress_events),
+                },
+                lifecycle={
+                    **lifecycle,
+                    "permission_decision": {
+                        "phase": "tool",
+                        "allowed": True,
+                        "source": permission.source or runtime_permission.source or "runtime",
+                        "mode": getattr(permission, "mode", "allow"),
+                        "reason": permission.reason,
+                    },
+                    "progress_events": progress_events,
+                },
+            )
+        context.report_progress(event="tool_complete", message=f"Completed {prepared_call.tool.user_facing_name(prepared_call.parsed_input)}")
         self._session_store.complete_tool_call(
             tool_call_id,
             status=AuditToolCallStatus.COMPLETED.value,
