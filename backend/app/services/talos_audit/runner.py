@@ -17,6 +17,7 @@ from app.models.talos_audit import TalosAuditJob, TalosAuditJobStatus
 from app.models.user import User
 from app.services.agent.task_executor import execute_agent_task, request_agent_task_cancellation
 from app.services.finding_runtime.config import FindingRuntimeStack
+from app.services.talos_audit.callback import send_talos_completion
 
 logger = logging.getLogger(__name__)
 
@@ -205,3 +206,14 @@ async def run_talos_audit_job(job_id: str) -> None:
         if completed_project is not None:
             completed_project.workspace_mode = "audit_completed"
         await db.commit()
+
+        try:
+            await send_talos_completion(
+                taskid=completed_job.request_id,
+                finalize_finding=final_payload,
+            )
+        except Exception:
+            # The audit result is already durable and can be recovered through
+            # the status endpoint.  Do not rerun a completed source audit merely
+            # because Talos' callback endpoint is temporarily unavailable.
+            logger.exception("Talos completion callback failed for taskid=%s", completed_job.request_id)

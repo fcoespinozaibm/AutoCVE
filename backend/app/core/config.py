@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     TALOS_AUDIT_MAX_ARCHIVE_SIZE_BYTES: int = 500 * 1024 * 1024
     TALOS_AUDIT_MAX_ARCHIVE_FILES: int = 100_000
     TALOS_AUDIT_MAX_UNCOMPRESSED_SIZE_BYTES: int = 2 * 1024 * 1024 * 1024
+    TALOS_CALLBACK_URL: Optional[str] = None
+    TALOS_CALLBACK_TOKEN: Optional[str] = None
+    TALOS_CALLBACK_TIMEOUT_SECONDS: float = 30.0
 
     CHECKMARX_FEATURE_ENABLED: bool = False
     CHECKMARX_BASE_URL: Optional[str] = None

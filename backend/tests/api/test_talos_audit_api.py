@@ -78,7 +78,7 @@ async def test_talos_route_is_hidden_when_not_configured(monkeypatch):
         response = await client.post(
             "/start",
             headers={"X-Talos-Token": "ignored"},
-            json={"request_id": "portal-1"},
+            json={"taskid": "portal-1"},
         )
 
     assert response.status_code == 404
@@ -126,13 +126,26 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
         response = await client.post(
             "/start",
             headers={"X-Talos-Token": "test-secret"},
-            json={"request_id": "portal-1"},
+            json={
+                "softurl": "https://example.com/source.zip",
+                "pid": "4810",
+                "version": "1.0.0",
+                "taskid": "portal-1",
+                "pname": "Talos test",
+                "packtype": "zip",
+                "scanType": "ai",
+                "action": "start",
+                "antype": "normal",
+                "platformType": "test",
+                "isShift": "scan",
+                "data": "",
+            },
         )
 
     assert response.status_code == 200, response.text
     acknowledgement = response.json()
-    assert set(acknowledgement) == {"request_id", "project_id", "status", "reused"}
-    assert acknowledgement["request_id"] == "portal-1"
+    assert set(acknowledgement) == {"taskid", "project_id", "status", "reused"}
+    assert acknowledgement["taskid"] == "portal-1"
     assert acknowledgement["status"] == "queued"
     assert acknowledgement["reused"] is False
 
@@ -178,7 +191,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_talos_rejects_client_supplied_archive_path(monkeypatch, tmp_path):
+async def test_talos_requires_taskid(monkeypatch, tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app = _build_app(session_factory)
@@ -190,7 +203,7 @@ async def test_talos_rejects_client_supplied_archive_path(monkeypatch, tmp_path)
         response = await client.post(
             "/start",
             headers={"X-Talos-Token": "test-secret"},
-            json={"request_id": "portal-1", "archive_path": "../secret.zip"},
+            json={"archive_path": "../secret.zip"},
         )
 
     assert response.status_code == 422
@@ -346,6 +359,15 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
     monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(talos_audit_runner, "execute_agent_task", fake_execute_agent_task)
 
+    callback: dict[str, object] = {}
+
+    async def fake_send_talos_completion(*, taskid: str, finalize_finding: dict):
+        callback["taskid"] = taskid
+        callback["finalize_finding"] = finalize_finding
+        return True
+
+    monkeypatch.setattr(talos_audit_runner, "send_talos_completion", fake_send_talos_completion)
+
     await talos_audit_runner.run_talos_audit_job("talos-job")
 
     async with session_factory() as db:
@@ -363,6 +385,7 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
     assert job is not None and job.status == TalosAuditJobStatus.COMPLETED
     assert job.finalize_finding == final_payload
     assert project is not None and project.workspace_mode == "audit_completed"
+    assert callback == {"taskid": "portal-1", "finalize_finding": final_payload}
     await engine.dispose()
 
 

@@ -49,11 +49,14 @@ _PORTAL_FILE_ID_NAMESPACE = b"portal-source-archive:v1\0"
 
 
 class TalosAuditRequest(BaseModel):
-    """Talos starts a previously received Portal archive by its stable request ID."""
+    """Accept Talos' start payload and map ``taskid`` to Portal's request ID."""
 
-    model_config = ConfigDict(extra="forbid")
+    # Talos currently sends additional scan metadata.  It is intentionally not
+    # trusted or used by AutoCVE yet, but accepting it keeps the start contract
+    # compatible while taskid remains the only archive lookup key.
+    model_config = ConfigDict(extra="allow")
 
-    request_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    taskid: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +68,7 @@ class PortalSourceArchive:
 
 
 class TalosAuditAcceptedResponse(BaseModel):
-    request_id: str
+    taskid: str
     project_id: str
     status: Literal["queued", "running", "completed", "failed", "cancelled"]
     reused: bool = False
@@ -202,7 +205,7 @@ async def _get_service_user(db: AsyncSession) -> User:
 
 def _to_talos_audit_status(job: TalosAuditJob, *, reused: bool = False) -> TalosAuditStatusResponse:
     return TalosAuditStatusResponse(
-        request_id=job.request_id,
+        taskid=job.request_id,
         project_id=job.project_id,
         status=job.status,
         session_id=job.audit_session_id,
@@ -220,10 +223,10 @@ async def _create_project_from_archive(
     db: AsyncSession,
 ) -> Project:
     project = Project(
-        name=(source_archive.project_name or f"Talos {request.request_id}").strip() or f"Talos {request.request_id}",
-        description=f"Created by Talos integration for request_id={request.request_id}",
+        name=(source_archive.project_name or f"Talos {request.taskid}").strip() or f"Talos {request.taskid}",
+        description=f"Created by Talos integration for taskid={request.taskid}",
         source_type="zip",
-        repository_url=_talos_project_ref(request.request_id),
+        repository_url=_talos_project_ref(request.taskid),
         repository_type="talos",
         default_branch="main",
         owner_id=service_user.id,
@@ -276,14 +279,14 @@ async def _start_talos_audit(
     service_user = await _get_service_user(db)
 
     existing_job = await _find_talos_audit_job(
-        request_id=payload.request_id,
+        request_id=payload.taskid,
         db=db,
     )
     if existing_job is not None:
         current = _to_talos_audit_status(existing_job, reused=True)
         return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding", "error_message"}))
 
-    source_archive = _resolve_portal_source_archive(payload.request_id)
+    source_archive = _resolve_portal_source_archive(payload.taskid)
     _validate_source_archive(source_archive.archive_path, source_archive.sha256)
     project = await _create_project_from_archive(
         request=payload,
@@ -292,7 +295,7 @@ async def _start_talos_audit(
         db=db,
     )
     job = TalosAuditJob(
-        request_id=payload.request_id,
+        request_id=payload.taskid,
         project_id=project.id,
         service_user_id=service_user.id,
         status=TalosAuditJobStatus.QUEUED,
@@ -308,7 +311,7 @@ async def _start_talos_audit(
         await db.commit()
         raise HTTPException(status_code=503, detail="Talos audit queue is unavailable") from exc
     return TalosAuditAcceptedResponse(
-        request_id=job.request_id,
+        taskid=job.request_id,
         project_id=job.project_id,
         status=job.status,
     )
@@ -334,16 +337,16 @@ async def start_talos_audit_alias(
     return await _start_talos_audit(payload=payload, db=db)
 
 
-@router.get("/audits/{request_id}", response_model=TalosAuditStatusResponse)
+@router.get("/audits/{taskid}", response_model=TalosAuditStatusResponse)
 async def get_talos_audit_result(
-    request_id: str,
+    taskid: str,
     _: None = Depends(_require_talos_token),
     db: AsyncSession = Depends(get_db),
 ) -> TalosAuditStatusResponse:
     """Temporary local result endpoint until Talos provides a callback contract."""
     await _get_service_user(db)
     job = await _find_talos_audit_job(
-        request_id=request_id,
+        request_id=taskid,
         db=db,
     )
     if job is None:
@@ -351,15 +354,15 @@ async def get_talos_audit_result(
     return _to_talos_audit_status(job)
 
 
-@router.post("/audits/{request_id}/cancel", response_model=TalosAuditStatusResponse)
+@router.post("/audits/{taskid}/cancel", response_model=TalosAuditStatusResponse)
 async def cancel_talos_audit(
-    request_id: str,
+    taskid: str,
     _: None = Depends(_require_talos_token),
     db: AsyncSession = Depends(get_db),
 ) -> TalosAuditStatusResponse:
     """Request cancellation of a queued or running Talos audit."""
     await _get_service_user(db)
-    job = await _find_talos_audit_job(request_id=request_id, db=db)
+    job = await _find_talos_audit_job(request_id=taskid, db=db)
     if job is None:
         raise HTTPException(status_code=404, detail="Talos audit request was not found")
     if job.status == TalosAuditJobStatus.COMPLETED:
