@@ -283,6 +283,33 @@ async def _start_talos_audit(
         db=db,
     )
     if existing_job is not None:
+        if existing_job.status in {TalosAuditJobStatus.FAILED, TalosAuditJobStatus.CANCELLED}:
+            # A terminal unsuccessful job may be started again with the same
+            # Talos task ID.  Keep the project/source archive, but make the
+            # worker create a fresh AgentTask rather than trying to resume a
+            # failed or cancelled one.
+            existing_job.status = TalosAuditJobStatus.QUEUED
+            existing_job.agent_task_id = None
+            existing_job.audit_session_id = None
+            existing_job.finalize_finding = None
+            existing_job.error_message = None
+            existing_job.started_at = None
+            existing_job.completed_at = None
+
+            existing_project = await db.get(Project, existing_job.project_id)
+            if existing_project is not None:
+                existing_project.workspace_mode = "audit_queued"
+            await db.commit()
+            await db.refresh(existing_job)
+
+            try:
+                await enqueue_talos_audit_job(existing_job.id)
+            except Exception as exc:
+                existing_job.status = TalosAuditJobStatus.FAILED
+                existing_job.error_message = f"Unable to enqueue Talos audit retry: {exc}"
+                await db.commit()
+                raise HTTPException(status_code=503, detail="Talos audit queue is unavailable") from exc
+
         current = _to_talos_audit_status(existing_job, reused=True)
         return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding", "error_message"}))
 

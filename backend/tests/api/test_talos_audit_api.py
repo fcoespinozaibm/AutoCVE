@@ -211,6 +211,82 @@ async def test_talos_requires_taskid(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("previous_status", [TalosAuditJobStatus.FAILED, TalosAuditJobStatus.CANCELLED])
+async def test_talos_restarts_failed_or_cancelled_job_with_same_taskid(monkeypatch, previous_status):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="talos-service-user",
+                email="talos@example.internal",
+                hashed_password="not-used",
+                is_active=True,
+                is_superuser=True,
+            )
+        )
+        db.add(Project(id="talos-project", name="Talos Project", owner_id="talos-service-user", source_type="zip"))
+        db.add(
+            TalosAuditJob(
+                id="talos-job",
+                request_id="portal-1",
+                project_id="talos-project",
+                service_user_id="talos-service-user",
+                agent_task_id="old-agent-task",
+                audit_session_id="old-audit-session",
+                status=previous_status,
+                finalize_finding={"old": True},
+                error_message="previous run failed",
+                attempts=3,
+            )
+        )
+        await db.commit()
+
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_SERVICE_USER_EMAIL", "talos@example.internal")
+    enqueued: list[str] = []
+
+    async def fake_enqueue_talos_audit_job(job_id: str):
+        enqueued.append(job_id)
+
+    monkeypatch.setattr(talos_audit_endpoint, "enqueue_talos_audit_job", fake_enqueue_talos_audit_job)
+    app = _build_app(session_factory)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/start",
+            headers={"X-Talos-Token": "test-secret"},
+            json={"taskid": "portal-1"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "taskid": "portal-1",
+        "project_id": "talos-project",
+        "status": TalosAuditJobStatus.QUEUED,
+        "reused": True,
+    }
+    assert enqueued == ["talos-job"]
+    async with session_factory() as db:
+        job = await db.get(TalosAuditJob, "talos-job")
+        project = await db.get(Project, "talos-project")
+    assert job is not None
+    assert job.status == TalosAuditJobStatus.QUEUED
+    assert job.agent_task_id is None
+    assert job.audit_session_id is None
+    assert job.finalize_finding is None
+    assert job.error_message is None
+    assert job.attempts == 3
+    assert job.started_at is None
+    assert job.completed_at is None
+    assert project is not None and project.workspace_mode == "audit_queued"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_talos_resolves_request_id_from_portal_metadata(monkeypatch, tmp_path):
     source_root = tmp_path / "portal-archives"
     source_root.mkdir()
