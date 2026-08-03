@@ -119,7 +119,14 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
     async def fake_enqueue_talos_audit_job(job_id: str):
         called["job_id"] = job_id
 
+    progress_events: list[dict[str, object]] = []
+
+    async def fake_report_talos_progress(**kwargs):
+        progress_events.append(kwargs)
+        return True
+
     monkeypatch.setattr(talos_audit_endpoint, "enqueue_talos_audit_job", fake_enqueue_talos_audit_job)
+    monkeypatch.setattr(talos_audit_endpoint, "report_talos_progress", fake_report_talos_progress)
 
     app = _build_app(session_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -148,6 +155,35 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
     assert acknowledgement["taskid"] == "portal-1"
     assert acknowledgement["status"] == "queued"
     assert acknowledgement["reused"] is False
+    assert progress_events == [
+        {
+            "taskid": "portal-1",
+            "status": "running",
+            "progress": 10,
+            "stage": "upload",
+            "message": "已接收扫描任务，开始导入源代码包。",
+            "node_status": "running",
+            "node_progress": 0,
+        },
+        {
+            "taskid": "portal-1",
+            "status": "running",
+            "progress": 30,
+            "stage": "scan",
+            "message": "源代码包已成功导入并解压，等待开始安全审计。",
+            "node_status": "pending",
+            "node_progress": 0,
+        },
+        {
+            "taskid": "portal-1",
+            "status": "queued",
+            "progress": 35,
+            "stage": "scan",
+            "message": "源代码包已准备完成，审计任务已进入队列。",
+            "node_status": "pending",
+            "node_progress": 0,
+        },
+    ]
 
     async with session_factory() as db:
         project = (await db.execute(select(Project))).scalar_one()
@@ -349,11 +385,19 @@ async def test_talos_cancel_marks_queued_job_cancelled(monkeypatch):
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_SERVICE_USER_EMAIL", "talos@example.internal")
+    progress_events: list[dict[str, object]] = []
+
+    async def fake_report_talos_progress(**kwargs):
+        progress_events.append(kwargs)
+        return True
+
+    monkeypatch.setattr(talos_audit_endpoint, "report_talos_progress", fake_report_talos_progress)
     app = _build_app(session_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/v1/integrations/talos/audits/portal-1/cancel",
+            "/cancel",
             headers={"X-Talos-Token": "test-secret"},
+            json={"taskid": "portal-1"},
         )
 
     assert response.status_code == 200, response.text
@@ -364,6 +408,17 @@ async def test_talos_cancel_marks_queued_job_cancelled(monkeypatch):
         project = await db.get(Project, "talos-project")
     assert job is not None and job.status == TalosAuditJobStatus.CANCELLED
     assert project is not None and project.workspace_mode == "audit_cancelled"
+    assert progress_events == [
+        {
+            "taskid": "portal-1",
+            "status": "cancelled",
+            "progress": 100,
+            "stage": "scan",
+            "message": "审计任务已取消。",
+            "node_status": "cancelled",
+            "node_progress": 100,
+        }
+    ]
     await engine.dispose()
 
 
@@ -436,6 +491,7 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
     monkeypatch.setattr(talos_audit_runner, "execute_agent_task", fake_execute_agent_task)
 
     callback: dict[str, object] = {}
+    progress_events: list[dict[str, object]] = []
 
     async def fake_send_talos_completion(*, taskid: str, finalize_finding: dict):
         callback["taskid"] = taskid
@@ -443,6 +499,12 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
         return True
 
     monkeypatch.setattr(talos_audit_runner, "send_talos_completion", fake_send_talos_completion)
+
+    async def fake_report_talos_progress(**kwargs):
+        progress_events.append(kwargs)
+        return True
+
+    monkeypatch.setattr(talos_audit_runner, "report_talos_progress", fake_report_talos_progress)
 
     await talos_audit_runner.run_talos_audit_job("talos-job")
 
@@ -462,6 +524,26 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
     assert job.finalize_finding == final_payload
     assert project is not None and project.workspace_mode == "audit_completed"
     assert callback == {"taskid": "portal-1", "finalize_finding": final_payload}
+    assert progress_events == [
+        {
+            "taskid": "portal-1",
+            "status": "running",
+            "progress": 50,
+            "stage": "scan",
+            "message": "开始执行源代码安全审计。",
+            "node_status": "running",
+            "node_progress": 0,
+        },
+        {
+            "taskid": "portal-1",
+            "status": "completed",
+            "progress": 100,
+            "stage": "scan",
+            "message": "源代码安全审计已完成，正在回传扫描结果。",
+            "node_status": "completed",
+            "node_progress": 100,
+        },
+    ]
     await engine.dispose()
 
 

@@ -29,6 +29,7 @@ from app.models.agent_task import AgentTask, AgentTaskStatus
 from app.models.talos_audit import TalosAuditJob, TalosAuditJobStatus
 from app.services.agent.task_executor import request_agent_task_cancellation
 from app.models.user import User
+from app.services.talos_audit.callback import report_talos_progress
 from app.services.talos_audit.task_queue import enqueue_talos_audit_job
 from app.services.zip_storage import (
     delete_project_persistent_source,
@@ -39,9 +40,8 @@ from app.services.zip_storage import (
 )
 
 router = APIRouter()
-# Talos uses a fixed root-level contract (POST /start).  Keep the existing
-# versioned router for backward compatibility, but route both entry points to
-# the same implementation below.
+# Talos uses fixed root-level contracts (POST /start and POST /cancel). Keep
+# the existing versioned router for backward compatibility.
 talos_alias_router = APIRouter()
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -255,6 +255,15 @@ async def _create_project_from_archive(
         )
         await db.commit()
         await db.refresh(project)
+        await report_talos_progress(
+            taskid=request.taskid,
+            status="running",
+            progress=30,
+            stage="scan",
+            message="源代码包已成功导入并解压，等待开始安全审计。",
+            node_status="pending",
+            node_progress=0,
+        )
         return project
     except Exception:
         await db.rollback()
@@ -309,10 +318,28 @@ async def _start_talos_audit(
                 existing_job.error_message = f"Unable to enqueue Talos audit retry: {exc}"
                 await db.commit()
                 raise HTTPException(status_code=503, detail="Talos audit queue is unavailable") from exc
+            await report_talos_progress(
+                taskid=existing_job.request_id,
+                status="queued",
+                progress=35,
+                stage="scan",
+                message="失败或已取消的任务已重新进入审计队列。",
+                node_status="pending",
+                node_progress=0,
+            )
 
         current = _to_talos_audit_status(existing_job, reused=True)
         return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding", "error_message"}))
 
+    await report_talos_progress(
+        taskid=payload.taskid,
+        status="running",
+        progress=10,
+        stage="upload",
+        message="已接收扫描任务，开始导入源代码包。",
+        node_status="running",
+        node_progress=0,
+    )
     source_archive = _resolve_portal_source_archive(payload.taskid)
     _validate_source_archive(source_archive.archive_path, source_archive.sha256)
     project = await _create_project_from_archive(
@@ -337,6 +364,15 @@ async def _start_talos_audit(
         job.error_message = f"Unable to enqueue Talos audit: {exc}"
         await db.commit()
         raise HTTPException(status_code=503, detail="Talos audit queue is unavailable") from exc
+    await report_talos_progress(
+        taskid=job.request_id,
+        status="queued",
+        progress=35,
+        stage="scan",
+        message="源代码包已准备完成，审计任务已进入队列。",
+        node_status="pending",
+        node_progress=0,
+    )
     return TalosAuditAcceptedResponse(
         taskid=job.request_id,
         project_id=job.project_id,
@@ -381,12 +417,7 @@ async def get_talos_audit_result(
     return _to_talos_audit_status(job)
 
 
-@router.post("/audits/{taskid}/cancel", response_model=TalosAuditStatusResponse)
-async def cancel_talos_audit(
-    taskid: str,
-    _: None = Depends(_require_talos_token),
-    db: AsyncSession = Depends(get_db),
-) -> TalosAuditStatusResponse:
+async def _cancel_talos_audit(*, taskid: str, db: AsyncSession) -> TalosAuditStatusResponse:
     """Request cancellation of a queued or running Talos audit."""
     await _get_service_user(db)
     job = await _find_talos_audit_job(request_id=taskid, db=db)
@@ -412,5 +443,34 @@ async def cancel_talos_audit(
             request_agent_task_cancellation(str(task.id))
         await db.commit()
         await db.refresh(job)
+        await report_talos_progress(
+            taskid=job.request_id,
+            status="cancelled",
+            progress=100,
+            stage="scan",
+            message="审计任务已取消。",
+            node_status="cancelled",
+            node_progress=100,
+        )
 
     return _to_talos_audit_status(job)
+
+
+@router.post("/audits/{taskid}/cancel", response_model=TalosAuditStatusResponse)
+async def cancel_talos_audit(
+    taskid: str,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditStatusResponse:
+    """Versioned Talos cancellation endpoint retained for existing callers."""
+    return await _cancel_talos_audit(taskid=taskid, db=db)
+
+
+@talos_alias_router.post("/cancel", response_model=TalosAuditStatusResponse, tags=["talos-integration"])
+async def cancel_talos_audit_alias(
+    payload: TalosAuditRequest,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditStatusResponse:
+    """Talos-compatible root alias that accepts the same JSON shape as /start."""
+    return await _cancel_talos_audit(taskid=payload.taskid, db=db)

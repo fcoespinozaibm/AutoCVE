@@ -17,7 +17,7 @@ from app.models.talos_audit import TalosAuditJob, TalosAuditJobStatus
 from app.models.user import User
 from app.services.agent.task_executor import execute_agent_task, request_agent_task_cancellation
 from app.services.finding_runtime.config import FindingRuntimeStack
-from app.services.talos_audit.callback import send_talos_completion
+from app.services.talos_audit.callback import report_talos_progress, send_talos_completion
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,15 @@ async def run_talos_audit_job(job_id: str) -> None:
             job.error_message = "Talos project or service user is unavailable"
             job.completed_at = datetime.now(timezone.utc)
             await db.commit()
+            await report_talos_progress(
+                taskid=job.request_id,
+                status="failed",
+                progress=100,
+                stage="scan",
+                message="审计任务无法启动：项目或服务账号不可用。",
+                node_status="failed",
+                node_progress=100,
+            )
             return
 
         task = await db.get(AgentTask, job.agent_task_id) if job.agent_task_id else None
@@ -150,12 +159,22 @@ async def run_talos_audit_job(job_id: str) -> None:
             job.agent_task_id = task.id
 
         project_id = str(project.id)
+        request_id = job.request_id
         job.status = TalosAuditJobStatus.RUNNING
         job.error_message = None
         job.attempts = int(job.attempts or 0) + 1
         job.started_at = job.started_at or datetime.now(timezone.utc)
         project.workspace_mode = "audit_running"
         await db.commit()
+        await report_talos_progress(
+            taskid=job.request_id,
+            status="running",
+            progress=50,
+            stage="scan",
+            message="开始执行源代码安全审计。",
+            node_status="running",
+            node_progress=0,
+        )
 
         audit_task = asyncio.create_task(execute_agent_task(str(task.id)))
         cancel_watch_task = asyncio.create_task(
@@ -174,6 +193,15 @@ async def run_talos_audit_job(job_id: str) -> None:
         except asyncio.CancelledError:
             await db.rollback()
             await _mark_talos_audit_cancelled(db=db, job_id=job_id, project_id=project_id)
+            await report_talos_progress(
+                taskid=request_id,
+                status="cancelled",
+                progress=100,
+                stage="scan",
+                message="审计任务已取消。",
+                node_status="cancelled",
+                node_progress=100,
+            )
             logger.info("Talos audit job %s cancelled", job_id)
             return
         except Exception as exc:
@@ -187,6 +215,15 @@ async def run_talos_audit_job(job_id: str) -> None:
             if failed_project is not None:
                 failed_project.workspace_mode = "audit_failed"
             await db.commit()
+            await report_talos_progress(
+                taskid=request_id,
+                status="failed",
+                progress=100,
+                stage="scan",
+                message=f"审计任务失败：{exc}",
+                node_status="failed",
+                node_progress=100,
+            )
             logger.exception("Talos audit job %s failed", job_id)
             raise
         finally:
@@ -206,6 +243,15 @@ async def run_talos_audit_job(job_id: str) -> None:
         if completed_project is not None:
             completed_project.workspace_mode = "audit_completed"
         await db.commit()
+        await report_talos_progress(
+            taskid=completed_job.request_id,
+            status="completed",
+            progress=100,
+            stage="scan",
+            message="源代码安全审计已完成，正在回传扫描结果。",
+            node_status="completed",
+            node_progress=100,
+        )
 
         try:
             await send_talos_completion(
