@@ -110,7 +110,7 @@ async def test_report_talos_progress_posts_expected_contract(monkeypatch):
         "node_id": "sast-ai",
         "running_details": [
             {"key": "receive", "status": "completed", "progress": 100},
-            {"key": "upload", "status": "completed", "progress": 100},
+            {"key": "extract", "status": "completed", "progress": 100},
             {"key": "scan", "status": "running", "progress": 10},
         ],
     }

@@ -335,7 +335,7 @@ async def _start_talos_audit(
         taskid=payload.taskid,
         status="running",
         progress=10,
-        stage="upload",
+        stage="extract",
         message="已接收扫描任务，开始导入源代码包。",
         node_status="running",
         node_progress=0,

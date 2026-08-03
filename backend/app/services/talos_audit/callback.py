@@ -13,7 +13,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_PROGRESS_NODES = ("receive", "upload", "scan")
+_PROGRESS_NODES = ("receive", "extract", "scan")
 
 
 def build_talos_completion_payload(*, taskid: str, finalize_finding: dict[str, Any]) -> dict[str, str]:
