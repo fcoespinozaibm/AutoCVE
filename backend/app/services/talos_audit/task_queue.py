@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Optional
+from uuid import uuid4
 
 from app.core.config import settings
 
@@ -27,14 +28,27 @@ class TalosAuditQueue:
             )
         return self.arq_pool
 
-    async def enqueue(self, job_id: str) -> None:
+    async def enqueue(self, job_id: str) -> Any:
+        """Submit one execution attempt and fail closed when ARQ deduplicates it.
+
+        A Talos task ID may be retried after a failed or cancelled execution.
+        Therefore the ARQ job ID identifies an individual dispatch attempt, not
+        merely the persistent ``TalosAuditJob`` database record.
+        """
         pool = await self._pool()
-        await pool.enqueue_job(
+        dispatch_id = f"talos-audit:{job_id}:{uuid4()}"
+        enqueued_job = await pool.enqueue_job(
             TALOS_AUDIT_JOB_NAME,
             str(job_id),
-            _job_id=f"talos-audit:{job_id}",
+            _job_id=dispatch_id,
             _queue_name=settings.AGENT_TASK_QUEUE_NAME,
         )
+        if enqueued_job is None:
+            # ARQ returns None when a job with the supplied _job_id already
+            # exists.  This should never occur with a per-dispatch UUID, and
+            # treating it as success leaves a database-only "queued" job.
+            raise RuntimeError(f"ARQ did not accept Talos audit dispatch {dispatch_id}")
+        return enqueued_job
 
     async def close(self) -> None:
         if not self._owns_pool or self.arq_pool is None:
@@ -46,9 +60,9 @@ class TalosAuditQueue:
                 await result
 
 
-async def enqueue_talos_audit_job(job_id: str) -> None:
+async def enqueue_talos_audit_job(job_id: str) -> Any:
     queue = TalosAuditQueue()
     try:
-        await queue.enqueue(job_id)
+        return await queue.enqueue(job_id)
     finally:
         await queue.close()
