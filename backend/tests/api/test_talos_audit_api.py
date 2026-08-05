@@ -303,7 +303,7 @@ async def test_talos_restarts_failed_or_cancelled_job_with_same_taskid(monkeypat
         "taskid": "portal-1",
         "project_id": "talos-project",
         "status": TalosAuditJobStatus.QUEUED,
-        "reused": True,
+        "reused": False,
     }
     assert enqueued == ["talos-job"]
     async with session_factory() as db:
@@ -319,6 +319,92 @@ async def test_talos_restarts_failed_or_cancelled_job_with_same_taskid(monkeypat
     assert job.started_at is None
     assert job.completed_at is None
     assert project is not None and project.workspace_mode == "audit_queued"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_talos_retry_cancels_active_job_then_requeues_it(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="talos-service-user",
+                email="talos@example.internal",
+                hashed_password="not-used",
+                is_active=True,
+                is_superuser=True,
+            )
+        )
+        db.add(Project(id="talos-project", name="Talos Project", owner_id="talos-service-user", source_type="zip"))
+        db.add(
+            TalosAuditJob(
+                id="talos-job",
+                request_id="portal-1",
+                project_id="talos-project",
+                service_user_id="talos-service-user",
+                agent_task_id="old-agent-task",
+                audit_session_id="old-audit-session",
+                status=TalosAuditJobStatus.RUNNING,
+                finalize_finding={"old": True},
+                error_message=None,
+            )
+        )
+        db.add(
+            AgentTask(
+                id="old-agent-task",
+                project_id="talos-project",
+                name="Old Talos audit",
+                status=AgentTaskStatus.RUNNING,
+                version_label="source-archive",
+                created_by="talos-service-user",
+            )
+        )
+        await db.commit()
+
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_SERVICE_USER_EMAIL", "talos@example.internal")
+    enqueued: list[str] = []
+
+    async def fake_enqueue_talos_audit_job(job_id: str):
+        enqueued.append(job_id)
+        return object()
+
+    async def fake_report_talos_progress(**_kwargs):
+        return True
+
+    monkeypatch.setattr(talos_audit_endpoint, "enqueue_talos_audit_job", fake_enqueue_talos_audit_job)
+    monkeypatch.setattr(talos_audit_endpoint, "report_talos_progress", fake_report_talos_progress)
+    app = _build_app(session_factory)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/retry",
+            headers={"X-Talos-Token": "test-secret"},
+            json={"taskid": "portal-1", "pid": "1111"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "taskid": "portal-1",
+        "project_id": "talos-project",
+        "status": TalosAuditJobStatus.QUEUED,
+        "reused": False,
+    }
+    assert enqueued == ["talos-job"]
+    async with session_factory() as db:
+        job = await db.get(TalosAuditJob, "talos-job")
+        old_task = await db.get(AgentTask, "old-agent-task")
+    assert job is not None
+    assert job.status == TalosAuditJobStatus.QUEUED
+    assert job.agent_task_id is None
+    assert job.audit_session_id is None
+    assert job.finalize_finding is None
+    assert job.error_message is None
+    assert old_task is not None and old_task.status == AgentTaskStatus.CANCELLED
     await engine.dispose()
 
 

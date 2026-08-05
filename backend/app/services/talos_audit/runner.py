@@ -81,9 +81,22 @@ async def _watch_talos_audit_cancellation(
                 return
 
 
-async def _mark_talos_audit_cancelled(*, db, job_id: str, project_id: str) -> None:
+async def _mark_talos_audit_cancelled(
+    *,
+    db,
+    job_id: str,
+    project_id: str,
+    expected_agent_task_id: str | None = None,
+) -> bool:
     job = await db.get(TalosAuditJob, job_id)
     project = await db.get(Project, project_id)
+    if job is not None and expected_agent_task_id is not None and job.agent_task_id != expected_agent_task_id:
+        logger.info(
+            "Ignoring cancellation from stale Talos audit attempt job_id=%s agent_task_id=%s",
+            job_id,
+            expected_agent_task_id,
+        )
+        return False
     if job is not None:
         job.status = TalosAuditJobStatus.CANCELLED
         job.error_message = "Talos audit cancelled by request"
@@ -91,6 +104,7 @@ async def _mark_talos_audit_cancelled(*, db, job_id: str, project_id: str) -> No
     if project is not None:
         project.workspace_mode = "audit_cancelled"
     await db.commit()
+    return True
 
 
 async def _load_talos_finalize_finding(*, db, task_id: str) -> tuple[AuditSession | None, dict | None]:
@@ -192,22 +206,35 @@ async def run_talos_audit_job(job_id: str) -> None:
                 raise RuntimeError("Normal intelligent audit completed without a FinalizeFinding payload")
         except asyncio.CancelledError:
             await db.rollback()
-            await _mark_talos_audit_cancelled(db=db, job_id=job_id, project_id=project_id)
-            await report_talos_progress(
-                taskid=request_id,
-                status="cancelled",
-                progress=100,
-                stage="scan",
-                message="审计任务已取消。",
-                node_status="cancelled",
-                node_progress=100,
+            cancelled_current_attempt = await _mark_talos_audit_cancelled(
+                db=db,
+                job_id=job_id,
+                project_id=project_id,
+                expected_agent_task_id=str(task.id),
             )
+            if cancelled_current_attempt:
+                await report_talos_progress(
+                    taskid=request_id,
+                    status="cancelled",
+                    progress=100,
+                    stage="scan",
+                    message="审计任务已取消。",
+                    node_status="cancelled",
+                    node_progress=100,
+                )
             logger.info("Talos audit job %s cancelled", job_id)
             return
         except Exception as exc:
             await db.rollback()
             failed_job = await db.get(TalosAuditJob, job_id)
             failed_project = await db.get(Project, project_id)
+            if failed_job is not None and failed_job.agent_task_id != str(task.id):
+                logger.info(
+                    "Ignoring failure from stale Talos audit attempt job_id=%s agent_task_id=%s",
+                    job_id,
+                    task.id,
+                )
+                return
             if failed_job is not None:
                 failed_job.status = TalosAuditJobStatus.FAILED
                 failed_job.error_message = str(exc)
@@ -233,7 +260,17 @@ async def run_talos_audit_job(job_id: str) -> None:
 
         completed_job = await db.get(TalosAuditJob, job_id)
         completed_project = await db.get(Project, project_id)
-        if completed_job is None or completed_job.status == TalosAuditJobStatus.CANCELLED:
+        if (
+            completed_job is None
+            or completed_job.status == TalosAuditJobStatus.CANCELLED
+            or completed_job.agent_task_id != str(task.id)
+        ):
+            if completed_job is not None and completed_job.agent_task_id != str(task.id):
+                logger.info(
+                    "Ignoring completion from stale Talos audit attempt job_id=%s agent_task_id=%s",
+                    job_id,
+                    task.id,
+                )
             return
         completed_job.status = TalosAuditJobStatus.COMPLETED
         completed_job.audit_session_id = session.id

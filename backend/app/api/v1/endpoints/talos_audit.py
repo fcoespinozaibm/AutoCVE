@@ -292,6 +292,7 @@ async def _start_talos_audit(
         db=db,
     )
     if existing_job is not None:
+        restarted = False
         if existing_job.status in {TalosAuditJobStatus.FAILED, TalosAuditJobStatus.CANCELLED}:
             # A terminal unsuccessful job may be started again with the same
             # Talos task ID.  Keep the project/source archive, but make the
@@ -304,6 +305,7 @@ async def _start_talos_audit(
             existing_job.error_message = None
             existing_job.started_at = None
             existing_job.completed_at = None
+            restarted = True
 
             existing_project = await db.get(Project, existing_job.project_id)
             if existing_project is not None:
@@ -328,7 +330,7 @@ async def _start_talos_audit(
                 node_progress=0,
             )
 
-        current = _to_talos_audit_status(existing_job, reused=True)
+        current = _to_talos_audit_status(existing_job, reused=not restarted)
         return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding", "error_message"}))
 
     await report_talos_progress(
@@ -456,6 +458,27 @@ async def _cancel_talos_audit(*, taskid: str, db: AsyncSession) -> TalosAuditSta
     return _to_talos_audit_status(job)
 
 
+async def _retry_talos_audit(
+    *,
+    payload: TalosAuditRequest,
+    db: AsyncSession,
+) -> TalosAuditAcceptedResponse:
+    """Cancel an active audit, then enqueue a fresh execution for its task ID."""
+    job = await _find_talos_audit_job(request_id=payload.taskid, db=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Talos audit request was not found")
+    if job.status == TalosAuditJobStatus.COMPLETED:
+        raise HTTPException(status_code=409, detail="Completed Talos audits cannot be retried")
+
+    # Failed and cancelled jobs are already terminal and _start_talos_audit
+    # knows how to reset them.  Active jobs must first follow the normal
+    # cancellation path so their AgentTask receives the cancellation signal.
+    if job.status not in {TalosAuditJobStatus.FAILED, TalosAuditJobStatus.CANCELLED}:
+        await _cancel_talos_audit(taskid=payload.taskid, db=db)
+
+    return await _start_talos_audit(payload=payload, db=db)
+
+
 @router.post("/audits/{taskid}/cancel", response_model=TalosAuditStatusResponse)
 async def cancel_talos_audit(
     taskid: str,
@@ -474,3 +497,23 @@ async def cancel_talos_audit_alias(
 ) -> TalosAuditStatusResponse:
     """Talos-compatible root alias that accepts the same JSON shape as /start."""
     return await _cancel_talos_audit(taskid=payload.taskid, db=db)
+
+
+@router.post("/audits/{taskid}/retry", response_model=TalosAuditAcceptedResponse)
+async def retry_talos_audit(
+    taskid: str,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditAcceptedResponse:
+    """Versioned retry endpoint for callers that use the original Talos API."""
+    return await _retry_talos_audit(payload=TalosAuditRequest(taskid=taskid), db=db)
+
+
+@talos_alias_router.post("/retry", response_model=TalosAuditAcceptedResponse, tags=["talos-integration"])
+async def retry_talos_audit_alias(
+    payload: TalosAuditRequest,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditAcceptedResponse:
+    """Talos-compatible retry alias: cancel the active attempt, then restart it."""
+    return await _retry_talos_audit(payload=payload, db=db)
