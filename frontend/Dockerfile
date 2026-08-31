@@ -20,10 +20,10 @@ ENV ALL_PROXY=""
 ENV no_proxy="*"
 ENV NO_PROXY="*"
 
-# 配置国内 npm 镜像�?
-RUN npm config set registry https://registry.npmmirror.com && \
+# 配置官方 npm registry
+RUN npm config set registry https://registry.npmjs.org && \
     npm install -g pnpm && \
-    pnpm config set registry https://registry.npmmirror.com
+    pnpm config set registry https://registry.npmjs.org
 
 # 复制依赖文件
 COPY package.json pnpm-lock.yaml ./

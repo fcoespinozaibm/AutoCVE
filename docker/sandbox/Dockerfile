@@ -2,10 +2,10 @@
 # 安全沙箱环境用于漏洞验证和 PoC 执行
 # 集成各类安全扫描工具 (Semgrep, Bandit, Gitleaks, etc.)
 
-FROM docker.m.daocloud.io/python:3.11-bookworm
+FROM python:3.11-bookworm
 
 ARG SEMGREP_VERSION=1.161.0
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
@@ -40,7 +40,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Node.js (用于 JavaScript/TypeScript 代码执行 和 npm audit)
-# 使用 Node.js binary tarball，优先国内镜像并回退官方源
+# 使用 Node.js binary tarball，使用官方源
 ARG NODE_VERSION=20.20.2
 ARG TARGETARCH
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
@@ -49,7 +49,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
       arm64) NODE_ARCH="arm64" ;; \
       *) echo "Unsupported Node.js architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
-    for base_url in "https://npmmirror.com/mirrors/node" "https://nodejs.org/dist"; do \
+    for base_url in "https://nodejs.org/dist"; do \
       curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 30 "${base_url}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz && break; \
     done && \
     test -s /tmp/node.tar.xz && \
@@ -57,18 +57,18 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     rm /tmp/node.tar.xz && \
     node --version && \
     npm --version && \
-    npm config set registry https://registry.npmmirror.com
+    npm config set registry https://registry.npmjs.org
 
-# 安装 Go (使用阿里云镜像)
+# 安装 Go (使用官方源)
 ENV PATH=$PATH:/usr/local/go/bin
-ENV GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=https://proxy.golang.org,direct
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     case "${TARGETARCH}" in \
       amd64) GO_ARCH="amd64" ;; \
       arm64) GO_ARCH="arm64" ;; \
       *) echo "Unsupported Go architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
-    curl -L "https://mirrors.aliyun.com/golang/go1.21.6.linux-${GO_ARCH}.tar.gz" -o go.tar.gz && \
+    curl -L "https://go.dev/dl/go1.21.6.linux-${GO_ARCH}.tar.gz" -o go.tar.gz && \
     tar -C /usr/local -xzf go.tar.gz && \
     rm go.tar.gz
 

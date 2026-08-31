@@ -58,7 +58,6 @@ export default defineConfig({
       allowedHeaders: [
         "Authorization",
         "Content-Type",
-        "X-DashScope-SSE",
         "X-Requested-With",
       ],
     },
@@ -67,17 +66,6 @@ export default defineConfig({
         target: process.env.VITE_API_TARGET || "http://127.0.0.1:8000",
         changeOrigin: true,
         secure: false,
-      },
-      "/dashscope-proxy": {
-        target: "https://dashscope.aliyuncs.com",
-        changeOrigin: true,
-        secure: true,
-        rewrite: (path) => path.replace(/^\/dashscope-proxy/, ""),
-        configure: (proxy) => {
-          proxy.on("proxyReq", (proxyReq) => {
-            proxyReq.setHeader("origin", "https://dashscope.aliyuncs.com");
-          });
-        },
       },
     },
   },
