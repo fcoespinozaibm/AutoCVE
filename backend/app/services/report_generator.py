@@ -19,6 +19,8 @@ from weasyprint import HTML, CSS
 from weasyprint.text.fonts import FontConfiguration
 from jinja2 import Template
 
+from app.core.config import settings
+
 class ReportGenerator:
     """
     基于 HTML/CSS 的专业 PDF 报告生成器
@@ -455,7 +457,7 @@ class ReportGenerator:
         # 注入 Logo
         context['logo_b64'] = cls._get_logo_base64()
         
-        template = Template(cls._TEMPLATE)
+        template = Template(cls._TEMPLATE.replace('lang="zh-CN"', f'lang="{settings.OUTPUT_LANGUAGE}"'))
         html_content = template.render(**context)
         font_config = FontConfiguration()
         pdf_file = io.BytesIO()

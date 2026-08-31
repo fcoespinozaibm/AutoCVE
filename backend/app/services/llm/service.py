@@ -265,6 +265,14 @@ class LLMService:
         user_other_config = self._user_config.get("otherConfig", {}) or {}
         return user_other_config.get("outputLanguage") or getattr(settings, "OUTPUT_LANGUAGE", "zh-CN")
 
+    def _resolve_language_family(self, output_language: Optional[str] = None) -> str:
+        normalized = (output_language or self._get_output_language() or "zh-CN").lower()
+        if normalized.startswith("zh"):
+            return "zh"
+        if normalized.startswith("es"):
+            return "es"
+        return "en"
+
     def _get_runtime_llm_limits(self) -> Dict[str, int]:
         other_config = self._user_config.get("otherConfig", {}) or {}
         raw_concurrency = other_config.get("llmConcurrency")
@@ -602,14 +610,21 @@ class LLMService:
         )
 
     def _analysis_system_prompt(self, output_language: Optional[str] = None) -> str:
-        is_chinese = (output_language or self._get_output_language()).lower().startswith("zh")
+        language_family = self._resolve_language_family(output_language)
         schema = self._build_analysis_schema()
-        if is_chinese:
+        if language_family == "zh":
             return (
                 "你是专业代码审计助手。请只输出 JSON，不要输出 Markdown，不要输出解释性前后缀。\n"
                 "返回结果必须符合给定 Schema，并尽量发现安全、逻辑、性能和可维护性问题。\n"
                 "line 和 column 必须是数字，code_snippet 使用字符串。\n"
                 f"JSON Schema:\n{schema}"
+            )
+        if language_family == "es":
+            return (
+                "Eres un asistente profesional de auditoría de código. Responde SOLO con JSON, sin Markdown ni texto explicativo adicional.\n"
+                "El resultado debe ajustarse al Schema indicado y detectar problemas de seguridad, lógica, rendimiento y mantenibilidad.\n"
+                "line y column deben ser numéricos y code_snippet una cadena de texto.\n"
+                f"Esquema JSON:\n{schema}"
             )
         return (
             "You are a professional code auditing assistant. Output JSON only. No markdown, no prose outside JSON.\n"
@@ -899,13 +914,19 @@ class LLMService:
 
     async def analyze_code(self, code: str, language: str, output_language: Optional[str] = None) -> Dict[str, Any]:
         actual_language = output_language or self._get_output_language()
-        is_chinese = actual_language.lower().startswith("zh")
+        language_family = self._resolve_language_family(actual_language)
         code_with_lines = "\n".join(f"{i + 1}| {line}" for i, line in enumerate(code.split("\n")))
-        if is_chinese:
+        if language_family == "zh":
             user_prompt = (
                 f"编程语言: {language}\n\n"
                 "⚠️ 代码已标注行号（格式：行号| 代码内容），请根据行号准确填写 line 字段。\n\n"
                 f"请分析以下代码：\n\n{code_with_lines}"
+            )
+        elif language_family == "es":
+            user_prompt = (
+                f"Lenguaje de programación: {language}\n\n"
+                "⚠️ El código está anotado con números de línea (formato: númeroDeLínea| código), completa el campo line con precisión.\n\n"
+                f"Analiza el siguiente código:\n\n{code_with_lines}"
             )
         else:
             user_prompt = (
@@ -969,13 +990,13 @@ class LLMService:
                 from app.models.audit_rule import AuditRuleSet
 
                 actual_language = output_language or self._get_output_language()
-                is_chinese = actual_language.lower().startswith("zh")
+                language_family = self._resolve_language_family(actual_language)
 
                 if prompt_template_id:
                     result = await db_session.execute(select(PromptTemplate).where(PromptTemplate.id == prompt_template_id))
                     template = result.scalar_one_or_none()
                     if template:
-                        custom_prompt = template.content_zh if is_chinese else template.content_en
+                        custom_prompt = template.content_zh if language_family == "zh" else template.content_en
                 elif use_default_template:
                     result = await db_session.execute(
                         select(PromptTemplate).where(
@@ -986,7 +1007,7 @@ class LLMService:
                     )
                     template = result.scalar_one_or_none()
                     if template:
-                        custom_prompt = template.content_zh if is_chinese else template.content_en
+                        custom_prompt = template.content_zh if language_family == "zh" else template.content_en
 
                 if rule_set_id:
                     result = await db_session.execute(

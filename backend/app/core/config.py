@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     ZIP_STORAGE_PATH: str = "./uploads/zip_files"
     PROJECT_SOURCE_STORAGE_PATH: str = "./uploads/project_sources"
     MANAGED_PROJECTS_ROOT: str = DEFAULT_MANAGED_PROJECTS_ROOT
+    # Output language for LLM analysis results and reports: zh-CN / en-US / es-ES
     OUTPUT_LANGUAGE: str = "zh-CN"
 
     CHECKMARX_FEATURE_ENABLED: bool = False

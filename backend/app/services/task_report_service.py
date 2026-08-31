@@ -6,6 +6,7 @@ from jinja2 import Template
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.agent_task import AgentFinding, AgentTask
 from app.models.project import Project
 from app.models.report_template import AgentTaskReport
@@ -257,7 +258,7 @@ def render_report_content(payload: Dict[str, Any], template_content: str, output
     if output_format == "html":
         escaped = rendered.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return (
-            "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='UTF-8'><title>AutoCVE 最终漏洞报告</title>"
+            f"<!DOCTYPE html><html lang='{settings.OUTPUT_LANGUAGE}'><head><meta charset='UTF-8'><title>AutoCVE 最终漏洞报告</title>"
             "<style>body{font-family:'Microsoft YaHei','PingFang SC',sans-serif;background:#f7f4ee;color:#24303f;padding:40px;}"
             ".page{max-width:1080px;margin:0 auto;background:white;border:1px solid #e6ddcf;border-radius:24px;"
             "box-shadow:0 30px 80px rgba(77,67,49,.12);padding:36px;}"
