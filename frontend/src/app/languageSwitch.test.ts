@@ -24,6 +24,13 @@ test("language switch runtime is enabled with zh/en/es support", () => {
   assert.match(domSource, /startsWith\("es"\)/);
 });
 
+test("spanish is the deployment base language", () => {
+  const i18nSource = readFileSync(resolve(sourceRoot, "shared/i18n/index.ts"), "utf8");
+
+  assert.match(i18nSource, /fallbackLng:\s*"es"/);
+  assert.match(i18nSource, /return "es";\s*\}/);
+});
+
 test("spanish catalog is registered with auto translations", () => {
   const resourcesSource = readFileSync(resolve(sourceRoot, "shared/i18n/resources.ts"), "utf8");
 

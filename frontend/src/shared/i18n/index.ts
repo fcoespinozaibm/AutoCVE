@@ -13,7 +13,7 @@ function isSupportedLanguage(value: string | null): value is SupportedLanguage {
 
 function getInitialLanguage(): SupportedLanguage {
   if (typeof window === "undefined") {
-    return "zh";
+    return "es";
   }
 
   const storedLanguage = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
@@ -22,19 +22,19 @@ function getInitialLanguage(): SupportedLanguage {
   }
 
   const browserLanguage = window.navigator.language?.toLowerCase() ?? "";
+  if (browserLanguage.startsWith("zh")) {
+    return "zh";
+  }
   if (browserLanguage.startsWith("en")) {
     return "en";
   }
-  if (browserLanguage.startsWith("es")) {
-    return "es";
-  }
-  return "zh";
+  return "es";
 }
 
 void i18n.use(initReactI18next).init({
   resources,
   lng: getInitialLanguage(),
-  fallbackLng: "zh",
+  fallbackLng: "es",
   supportedLngs: ["zh", "en", "es"],
   interpolation: {
     escapeValue: false,
@@ -45,10 +45,10 @@ export function getCurrentLanguage(): SupportedLanguage {
   if (i18n.language === "en") {
     return "en";
   }
-  if (i18n.language === "es") {
-    return "es";
+  if (i18n.language === "zh") {
+    return "zh";
   }
-  return "zh";
+  return "es";
 }
 
 export async function setAppLanguage(language: SupportedLanguage) {
