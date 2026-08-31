@@ -3,12 +3,12 @@ import { initReactI18next } from "react-i18next";
 
 import { resources } from "./resources";
 
-export type SupportedLanguage = "zh" | "en";
+export type SupportedLanguage = "zh" | "en" | "es";
 
 export const LANGUAGE_STORAGE_KEY = "autocve.language";
 
 function isSupportedLanguage(value: string | null): value is SupportedLanguage {
-  return value === "zh" || value === "en";
+  return value === "zh" || value === "en" || value === "es";
 }
 
 function getInitialLanguage(): SupportedLanguage {
@@ -17,21 +17,38 @@ function getInitialLanguage(): SupportedLanguage {
   }
 
   const storedLanguage = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
-  return isSupportedLanguage(storedLanguage) ? storedLanguage : "zh";
+  if (isSupportedLanguage(storedLanguage)) {
+    return storedLanguage;
+  }
+
+  const browserLanguage = window.navigator.language?.toLowerCase() ?? "";
+  if (browserLanguage.startsWith("en")) {
+    return "en";
+  }
+  if (browserLanguage.startsWith("es")) {
+    return "es";
+  }
+  return "zh";
 }
 
 void i18n.use(initReactI18next).init({
   resources,
   lng: getInitialLanguage(),
   fallbackLng: "zh",
-  supportedLngs: ["zh", "en"],
+  supportedLngs: ["zh", "en", "es"],
   interpolation: {
     escapeValue: false,
   },
 });
 
 export function getCurrentLanguage(): SupportedLanguage {
-  return i18n.language === "en" ? "en" : "zh";
+  if (i18n.language === "en") {
+    return "en";
+  }
+  if (i18n.language === "es") {
+    return "es";
+  }
+  return "zh";
 }
 
 export async function setAppLanguage(language: SupportedLanguage) {

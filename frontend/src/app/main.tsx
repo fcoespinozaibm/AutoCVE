@@ -6,6 +6,7 @@ import App from "./App.tsx";
 import { AppWrapper } from "@/components/layout/PageMeta";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import "@/shared/utils/fetchWrapper"; // 初始化fetch拦截器
+import "@/shared/i18n"; // 初始化i18n多语言运行时
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

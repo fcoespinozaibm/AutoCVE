@@ -2,16 +2,28 @@ import { Languages } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { getCurrentLanguage, setAppLanguage } from "@/shared/i18n";
+import { getCurrentLanguage, setAppLanguage, type SupportedLanguage } from "@/shared/i18n";
+
+const LANGUAGE_CYCLE: Record<SupportedLanguage, SupportedLanguage> = {
+  zh: "en",
+  en: "es",
+  es: "zh",
+};
+
+const LANGUAGE_BADGES: Record<SupportedLanguage, string> = {
+  zh: "中文",
+  en: "EN",
+  es: "ES",
+};
 
 interface LanguageSwitcherProps {
   collapsed?: boolean;
 }
 
 export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcherProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const currentLanguage = getCurrentLanguage();
-  const nextLanguage = currentLanguage === "zh" ? "en" : "zh";
+  const nextLanguage = LANGUAGE_CYCLE[currentLanguage];
 
   async function handleToggleLanguage() {
     await setAppLanguage(nextLanguage);
@@ -33,9 +45,12 @@ export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcher
         <span className="flex min-w-0 flex-1 items-center justify-between gap-3">
           <span className="truncate text-sm font-semibold">{t("language.label")}</span>
           <span className="rounded-full border border-slate-200 bg-[#f8f9f8] px-2 py-0.5 text-xs font-semibold text-slate-500">
-            {i18n.language === "en" ? "EN" : "中文"}
+            {LANGUAGE_BADGES[currentLanguage]}
           </span>
         </span>
+      )}
+      {collapsed && (
+        <span className="sr-only">{LANGUAGE_BADGES[nextLanguage]}</span>
       )}
     </Button>
   );

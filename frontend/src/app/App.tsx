@@ -8,6 +8,7 @@ import { ProtectedRoute } from "./ProtectedRoute";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import NotFound from "@/pages/NotFound";
+import { useAutoTranslateDom } from "@/shared/i18n/useAutoTranslateDom";
 
 function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
@@ -29,6 +30,8 @@ function AppLayout() {
 }
 
 function App() {
+  useAutoTranslateDom();
+
   return (
     <AuthProvider>
       <BrowserRouter>

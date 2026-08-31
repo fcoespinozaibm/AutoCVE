@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { ArrowRight, CheckCircle2, Lock, Mail } from "lucide-react";
 import loginBackground from "@/assets/LoginBackground2.png";
 import { getLoginErrorMessage } from "./loginErrorMessage";
+import LanguageSwitcher from "@/components/layout/LanguageSwitcher";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -67,6 +68,9 @@ export default function Login() {
 
   return (
     <div className="min-h-screen bg-[linear-gradient(135deg,#eef4f0_0%,#f8faf8_42%,#e4ece7_100%)] p-4 md:p-8">
+      <div className="fixed right-5 top-5 z-50">
+        <LanguageSwitcher collapsed />
+      </div>
       <div
         className="mx-auto grid min-h-[calc(100vh-2rem)] max-w-7xl overflow-hidden rounded-[36px] border border-white/80 bg-cover bg-left-center shadow-[0_34px_90px_rgba(72,91,82,0.18)] md:min-h-[calc(100vh-4rem)] lg:grid-cols-[1.08fr_0.92fr]"
         style={{ backgroundImage: `url(${loginBackground})` }}

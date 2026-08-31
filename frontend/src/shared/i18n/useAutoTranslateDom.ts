@@ -1,7 +1,12 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
-import { autoAttributeTranslations, autoTemplateTranslations, autoTextTranslations } from "./resources";
+import {
+  autoAttributeTranslations,
+  autoTemplateTranslations,
+  autoTextTranslations,
+  type AutoLanguage,
+} from "./resources";
 
 const SKIP_SELECTOR = [
   "script",
@@ -23,8 +28,15 @@ type TranslatedAttribute = (typeof TRANSLATED_ATTRIBUTES)[number];
 const originalTextByNode = new WeakMap<Text, string>();
 const originalAttributesByElement = new WeakMap<Element, Partial<Record<TranslatedAttribute, string>>>();
 
-function isEnglishLanguage(language: string) {
-  return language.toLowerCase().startsWith("en");
+function resolveAutoLanguage(language: string): AutoLanguage | null {
+  const normalized = language.toLowerCase();
+  if (normalized.startsWith("en")) {
+    return "en";
+  }
+  if (normalized.startsWith("es")) {
+    return "es";
+  }
+  return null;
 }
 
 function shouldSkipNode(node: Node) {
@@ -64,26 +76,30 @@ function hasTranslatableContent(node: Node) {
 function syncTextNode(node: Text, language: string) {
   if (shouldSkipNode(node)) return;
 
+  const autoLanguage = resolveAutoLanguage(language);
+
   const originalText = originalTextByNode.get(node) ?? node.nodeValue ?? "";
   if (!originalTextByNode.has(node)) {
     originalTextByNode.set(node, originalText);
   }
 
   const trimmed = originalText.trim();
-  const translated = autoTextTranslations[trimmed] ?? translateTemplateText(trimmed);
+  const translated = autoLanguage
+    ? (autoTextTranslations[autoLanguage][trimmed] ?? translateTemplateText(trimmed, autoLanguage))
+    : undefined;
   if (!translated) return;
 
   const leading = originalText.match(/^\s*/)?.[0] ?? "";
   const trailing = originalText.match(/\s*$/)?.[0] ?? "";
-  const nextText = isEnglishLanguage(language) ? `${leading}${translated}${trailing}` : originalText;
+  const nextText = autoLanguage ? `${leading}${translated}${trailing}` : originalText;
 
   if (node.nodeValue !== nextText) {
     node.nodeValue = nextText;
   }
 }
 
-function translateTemplateText(text: string) {
-  for (const template of autoTemplateTranslations) {
+function translateTemplateText(text: string, autoLanguage: AutoLanguage) {
+  for (const template of autoTemplateTranslations[autoLanguage]) {
     const match = text.match(template.pattern);
     if (match) {
       return template.translate(...match);
@@ -96,6 +112,8 @@ function translateTemplateText(text: string) {
 function syncElementAttributes(element: Element, language: string) {
   if (element.closest(SKIP_SELECTOR)) return;
 
+  const autoLanguage = resolveAutoLanguage(language);
+
   for (const attribute of TRANSLATED_ATTRIBUTES) {
     const currentValue = element.getAttribute(attribute);
     if (!currentValue) continue;
@@ -105,10 +123,10 @@ function syncElementAttributes(element: Element, language: string) {
     originals[attribute] = originalValue;
     originalAttributesByElement.set(element, originals);
 
-    const translated = autoAttributeTranslations[originalValue];
+    const translated = autoLanguage ? autoAttributeTranslations[autoLanguage][originalValue] : undefined;
     if (!translated) continue;
 
-    const nextValue = isEnglishLanguage(language) ? translated : originalValue;
+    const nextValue = autoLanguage ? translated : originalValue;
     if (currentValue !== nextValue) {
       element.setAttribute(attribute, nextValue);
     }

@@ -21,6 +21,7 @@ import {
 
 import routes from '@/app/routes';
 import { Button } from '@/components/ui/button';
+import LanguageSwitcher from '@/components/layout/LanguageSwitcher';
 import { appVersionLabel } from '@/shared/config/version';
 
 const routeIcons: Record<string, ReactNode> = {
@@ -149,6 +150,10 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
                 </div>
               )}
             </Link>
+
+            <div className="mt-3">
+              <LanguageSwitcher collapsed={collapsed} />
+            </div>
 
             {!collapsed && (
               <div className="mt-3 flex items-center justify-between px-1 text-xs text-slate-400">

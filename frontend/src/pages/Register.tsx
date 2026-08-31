@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { ArrowRight, CheckCircle2, Lock, Mail, ShieldCheck, User, Wand2 } from "lucide-react";
 import { appVersionLabel } from "@/shared/config/version";
+import LanguageSwitcher from "@/components/layout/LanguageSwitcher";
 
 const onboardingPoints = [
   {
@@ -56,6 +57,9 @@ export default function Register() {
 
   return (
     <div className="min-h-screen gradient-bg p-4 md:p-6">
+      <div className="fixed right-5 top-5 z-50">
+        <LanguageSwitcher collapsed />
+      </div>
       <div className="mx-auto grid min-h-[calc(100vh-2rem)] max-w-6xl overflow-hidden rounded-[40px] border border-white/70 bg-white/55 lg:grid-cols-[1.04fr_0.96fr] shadow-[0_28px_80px_rgba(88,97,110,0.12)] backdrop-blur-xl">
         <section className="relative hidden border-r border-slate-200/70 bg-[linear-gradient(180deg,rgba(249,250,249,0.92),rgba(242,245,244,0.92))] p-10 lg:flex lg:flex-col xl:p-12">
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.68),transparent_32%),radial-gradient(circle_at_bottom_right,rgba(197,214,205,0.22),transparent_28%)]" />
