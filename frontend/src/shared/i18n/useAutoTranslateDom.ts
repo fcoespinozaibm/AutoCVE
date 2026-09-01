@@ -7,6 +7,11 @@ import {
   autoTextTranslations,
   type AutoLanguage,
 } from "./resources";
+import { generatedTextTranslationsEs } from "./resources.generated";
+
+const extraTextTranslations: Partial<Record<AutoLanguage, Record<string, string>>> = {
+  es: generatedTextTranslationsEs,
+};
 
 const SKIP_SELECTOR = [
   "script",
@@ -85,7 +90,9 @@ function syncTextNode(node: Text, language: string) {
 
   const trimmed = originalText.trim();
   const translated = autoLanguage
-    ? (autoTextTranslations[autoLanguage][trimmed] ?? translateTemplateText(trimmed, autoLanguage))
+    ? (autoTextTranslations[autoLanguage][trimmed]
+        ?? extraTextTranslations[autoLanguage]?.[trimmed]
+        ?? translateTemplateText(trimmed, autoLanguage))
     : undefined;
   if (!translated) return;
 
