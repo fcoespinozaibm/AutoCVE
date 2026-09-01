@@ -28,8 +28,9 @@ RUN npm config set registry https://registry.npmjs.org && \
 # 复制依赖文件
 COPY package.json pnpm-lock.yaml ./
 
-# 增加网络超时设置和并发数限制，防 ARM 架构构建卡死（使用 CLI 参数以兼容 pnpm 10）
-RUN pnpm install --no-frozen-lockfile --network-concurrency 1 --network-timeout 300000 --fetch-retries 5
+# 增加网络超时设置和并发数限制，防 ARM 架构构建卡死（通过 npm_config_* 环境变量配置，兼容 pnpm 9/10）
+RUN npm_config_frozen_lockfile=false npm_config_network_timeout=300000 npm_config_fetch_retries=5 npm_config_network_concurrency=1 \
+    pnpm install
 
 # 复制源代�?
 COPY . .
