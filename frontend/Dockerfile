@@ -22,7 +22,7 @@ ENV NO_PROXY="*"
 
 # 配置官方 npm registry
 RUN npm config set registry https://registry.npmjs.org && \
-    npm install -g pnpm && \
+    npm install -g pnpm@9 && \
     pnpm config set registry https://registry.npmjs.org
 
 # 复制依赖文件
